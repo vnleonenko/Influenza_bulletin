@@ -122,7 +122,14 @@ def calibration_forecast_plot(
     ci_params = list(model.get_ci_params())
 
     # magic 10: (10 000)/N but better (10 000 / N) 
-    coef = 10000 / epid_data.returned_df["total_population"].iloc[0] 
+    # coef = 10000 / epid_data.returned_df["total_population"].iloc[-1] 
+    coef_array_data = np.array(10000 / epid_data.returned_df["total_population"]) # размер популяции может меняться, поэтому массив
+    coef_array_forecast =np.full(forecast_duration+1, 10000 / epid_data.returned_df["total_population"].iloc[-1])
+    coef_array_all = np.concatenate([coef_array_data, coef_array_forecast[1:]])
+    print(coef_array_data)
+    print(coef_array_forecast)
+    print(coef_array_all)
+    
 
     # Желаемый размер в пикселях
     desired_width_px = 900
@@ -145,18 +152,18 @@ def calibration_forecast_plot(
 
         for i in range(len(res)):
             # plt.plot(array, res[i], lw=0.3, alpha=0.5, color=color[i])
-            plt.plot(array, res[i] * coef, lw=0.3, alpha=0.5, color='lightblue')
+            plt.plot(array, res[i] * coef_array_all, lw=0.3, alpha=0.5, color='lightblue')
 
 
     model.simulate(params=model.get_best_params(), modeling_duration=dur)
 
     res = func_to_get_newly_data()
-    print(res)
+    print(res*coef_array_all)
     for i in range(len(res)):
         # print(res[i])
         plt.plot(
             array[:len(plot_data[:, i])],
-            res[i][:len(plot_data[:, i])] * coef,
+            res[i][:len(plot_data[:, i])] * coef_array_data,
             label=f"Лучшая модель, $R^2$: {round(r2_score(plot_data[:, i], res[i][:len(plot_data[:, i])]), 2)}",
             lw = 1.0,
             color='royalblue',
@@ -164,7 +171,7 @@ def calibration_forecast_plot(
         last_known_idx = len(plot_data[:, i]) - 1
         plt.plot(
                 array[last_known_idx:],  # Start from last known point
-                res[i][last_known_idx:] * coef,
+                res[i][last_known_idx:] * coef_array_forecast,
                 '--', color='lightcoral', alpha=1.0,
                 label='Прогноз'
             )
@@ -173,8 +180,8 @@ def calibration_forecast_plot(
         #     res[i][(len(plot_data[:, i])):]* coef,
         #      '--', color='lightcoral', alpha=1.0, label='Future data')
         print(plot_data[:, i])
-        plt.scatter(array[:len(plot_data[:, i])], plot_data[:, i]* coef, marker= "o", color='blue', zorder=5, label = "Данные")
-        print(plot_data[:, i]* coef)
+        plt.scatter(array[:len(plot_data[:, i])], plot_data[:, i]* coef_array_data, marker= "o", color='blue', zorder=5, label = "Данные")
+        print(plot_data[:, i]* coef_array_data)
 
 
     # plt.title(f"{method.capitalize()}, {type.capitalize()}")
