@@ -141,14 +141,14 @@ class InfluenzaData(EpidData):
                 * self.cases_df["sars_total_cases"]
             ).round()
 
-        self.cases_df = self.cases_df.drop(
-            columns=[
-                "tested_total",
-                "tested_strain_0",
-                "tested_strain_1",
-                "tested_strain_2",
-                "tested_strain_3",
-            ]
-        )
+        # self.cases_df = self.cases_df.drop(
+        #     columns=[
+        #         "tested_total",
+        #         "tested_strain_0",
+        #         "tested_strain_1",
+        #         "tested_strain_2",
+        #         "tested_strain_3",
+        #     ]
+        # )
 
         self.cases_df = self.cases_df.fillna(float("nan"))
