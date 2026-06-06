@@ -1,212 +1,345 @@
 import matplotlib.pyplot as plt
 from sklearn.metrics import r2_score
 import numpy as np
-from matplotlib.colors import LinearSegmentedColormap
-
+import io
+from typing import Literal, Optional, Union, Dict, Any
 from model_complex import Calibration, FactoryModel, ModelParams
 from PIL import Image
 
-# from ..epid_results import prevalence_plot, 
+
+# ========== УТИЛИТЫ ДЛЯ РАБОТЫ С ДАННЫМИ ==========
 
 def week_to_label(week_num, year):
     """Конвертирует номер недели в метку с учетом нового года"""
     while week_num > 52:
         week_num -= 52
         year += 1
-    
     return f"{week_num}"
-    # return f"{week_num}нед,\n{year:02d}"
+
 
 def prepare_calibration_data(epid_data, type):
+    """Подготавливает данные для калибровки"""
     epid_data.get_wave_data(type=type)
     data = epid_data.get_data()
     dur = epid_data.get_duration()
     plot_data = epid_data.prepare_for_plot()
     return data, dur, plot_data
 
-def resize_img(file_path: str, future_size: tuple = (900, 330), prefix_name: str = "small", format: str = "png" ):
-    # filename = "method_annealing_eps_10_iter_0_time_175907_russia_annealing_total_2025-2025.png"
-    img = Image.open(file_path)
 
-    # Ресайз до точного размера
-    img_resized = img.resize(future_size, Image.Resampling.LANCZOS)
-
-    new_file_path = file_path.replace(format, "_" + prefix_name + "." +format)
-    # # Перезапись файла
-    img_resized.save(new_file_path)
-
-    return new_file_path
-
-
-def calibration_forecast_plot(
-    epid_data,
-    city,
-    method,
-    type,
-    forecast_duration,
-    title,
-    save_path,
-    epsilon=3000,
-    is_prevalence_plot=False,
-    is_recovered_plot=False
-):
-
-    data, dur, plot_data = prepare_calibration_data(epid_data, type)
+def get_model_and_function(epid_data, type):
+    """Создает модель и возвращает функцию для получения данных"""
     model_params = ModelParams(
         alpha=[0],
         beta=[0],
         population_size=epid_data.get_rho() // 10,
         initial_infectious=[100],
     )
-
+    
     model = FactoryModel.get_model(type)
-
+    
     if type == "age":
         model_params.initial_infectious = [100, 100]
-        label = {0: "0-14 years", 1: "15+ years"}
-
-    else:
-        label = {0: "total"}
-
-    color = {0: "blue", 1: "orange"}
-
-    if data.attrs["time_step"] == "week":
+    
+    if epid_data.get_data().attrs["time_step"] == "week":
         func_to_get_newly_data = model.get_weekly_newly_infected_by_group
-
     else:
         func_to_get_newly_data = model.get_daily_newly_infected_by_group
+    
+    return model, model_params, func_to_get_newly_data
 
+
+def run_calibration(model, data, model_params, method, epsilon):
+    """Запускает калибровку модели"""
     calibration = Calibration(model, data, model_params)
-
+    
     if method.lower() == "annealing":
         calibration.annealing_calibration()
     elif method.lower() == "abc":
         calibration.abc_calibration(sample=200, epsilon=epsilon)
     elif method.lower() == "mcmc":
-        calibration.mcmc_calibration(sample=200, epsilon=epsilon)
+        calibration.mcmc_calibration(sample=600, epsilon=epsilon)
     else:
         calibration.optuna_calibration()
-
-    # if is_prevalence_plot:
-    #     prevalence_plot(
-    #         st_time,
-    #         end_time,
-    #         city,
-    #         method,
-    #         type,
-    #         save_path,
-    #         model,
-    #         data.attrs["time_step"],
-    #     )
-
-    # if is_recovered_plot:
-    #     recovered_plot(
-    #         st_time,
-    #         end_time,
-    #         city,
-    #         method,
-    #         type,
-    #         save_path,
-    #         model,
-    #         data.attrs["time_step"],
-    #     )
-
     
-    
-    
-    dur += forecast_duration * 7
-    # print(dur)
+    return calibration
+
+
+def calculate_coefficients(epid_data, forecast_duration):
+    """Рассчитывает коэффициенты нормализации"""
+    coef_array_data = np.array(10000 / epid_data.returned_df["total_population"])
+    coef_array_forecast = np.full(forecast_duration + 1, 10000 / epid_data.returned_df["total_population"].iloc[-1])
+    coef_array_all = np.concatenate([coef_array_data, coef_array_forecast[1:]])
+    return coef_array_data, coef_array_forecast, coef_array_all
+
+
+def prepare_x_axis(epid_data, dur):
+    """Подготавливает ось X и метки"""
     array = list(range(epid_data.begin_week, epid_data.begin_week + round(dur / 7)))
     x_labels = [week_to_label(week, epid_data.begin_year) for week in array]
+    return array, x_labels
 
-    ci_params = list(model.get_ci_params())
 
-    # magic 10: (10 000)/N but better (10 000 / N) 
-    # coef = 10000 / epid_data.returned_df["total_population"].iloc[-1] 
-    coef_array_data = np.array(10000 / epid_data.returned_df["total_population"]) # размер популяции может меняться, поэтому массив
-    coef_array_forecast =np.full(forecast_duration+1, 10000 / epid_data.returned_df["total_population"].iloc[-1])
-    coef_array_all = np.concatenate([coef_array_data, coef_array_forecast[1:]])
-    print(coef_array_data)
-    print(coef_array_forecast)
-    print(coef_array_all)
-    
+# ========== ФУНКЦИИ ДЛЯ ПОСТРОЕНИЯ ГРАФИКА ==========
 
-    # Желаемый размер в пикселях
-    desired_width_px = 900
-    desired_height_px = 330
+def setup_figure():
+    """Настраивает фигуру matplotlib"""
+    desired_width_px, desired_height_px = 900, 330
     dpi = 600
-
-    # Конвертируем в дюймы (для matplotlib)
     width_inches = desired_width_px / dpi
     height_inches = desired_height_px / dpi
+    plt.figure(figsize=(width_inches * 8, height_inches * 8))
+    return dpi
 
-    # Создаем фигуру нужного размера
-    plt.figure(figsize=(width_inches*8, height_inches*8))
 
-    for line_num, ci_par in enumerate(ci_params):
-        print(f"Line {line_num}: {ci_par}")
-        
+def plot_confidence_intervals(model, func_to_get_newly_data, array, coef_array_all, ci_params, dur):
+    """Рисует доверительные интервалы"""
+    for ci_par in ci_params:
         model.simulate(params=ci_par, modeling_duration=dur)
-
         res = func_to_get_newly_data()
-
         for i in range(len(res)):
-            # plt.plot(array, res[i], lw=0.3, alpha=0.5, color=color[i])
             plt.plot(array, res[i] * coef_array_all, lw=0.3, alpha=0.5, color='lightblue')
 
 
+def plot_best_model_and_data(model, func_to_get_newly_data, array, plot_data, 
+                              coef_array_data, coef_array_forecast, dur):
+    """Рисует лучшую модель и данные"""
     model.simulate(params=model.get_best_params(), modeling_duration=dur)
-
     res = func_to_get_newly_data()
-    print(res*coef_array_all)
+    
     for i in range(len(res)):
-        # print(res[i])
+        r2 = round(r2_score(plot_data[:, i], res[i][:len(plot_data[:, i])]), 2)
         plt.plot(
             array[:len(plot_data[:, i])],
             res[i][:len(plot_data[:, i])] * coef_array_data,
-            label=f"Лучшая модель, $R^2$: {round(r2_score(plot_data[:, i], res[i][:len(plot_data[:, i])]), 2)}",
-            lw = 1.0,
+            label=f"Лучшая модель, $R^2$: {r2}",
+            lw=1.0,
             color='royalblue',
         )
+        
         last_known_idx = len(plot_data[:, i]) - 1
         plt.plot(
-                array[last_known_idx:],  # Start from last known point
-                res[i][last_known_idx:] * coef_array_forecast,
-                '--', color='lightcoral', alpha=1.0,
-                label='Прогноз'
-            )
-        # plt.plot(
-        #     array[(len(plot_data[:, i])):],
-        #     res[i][(len(plot_data[:, i])):]* coef,
-        #      '--', color='lightcoral', alpha=1.0, label='Future data')
-        print(plot_data[:, i])
-        plt.scatter(array[:len(plot_data[:, i])], plot_data[:, i]* coef_array_data, marker= "o", color='blue', zorder=5, label = "Данные")
-        print(plot_data[:, i]* coef_array_data)
+            array[last_known_idx:],
+            res[i][last_known_idx:] * coef_array_forecast,
+            '--', color='lightcoral', alpha=1.0,
+            label='Прогноз'
+        )
+        
+        plt.scatter(
+            array[:len(plot_data[:, i])],
+            plot_data[:, i] * coef_array_data,
+            marker="o", color='blue', zorder=5, label="Данные"
+        )
 
 
-    # plt.title(f"{method.capitalize()}, {type.capitalize()}")
-    # plt.title("Заболеваемость по РФ", fontsize=14, fontweight='bold')
-    # plt.tight_layout(pad=2.5, h_pad=2.5, w_pad=2.5)
+def configure_plot_style(array, x_labels):
+    """Настраивает стиль графика"""
     plt.grid(True, which='both', linestyle='--', linewidth=0.5, alpha=0.7)
-    y_min, y_max = plt.ylim()  # Получаем текущие границы оси Y
+    y_min, y_max = plt.ylim()
     y_ticks = np.arange(0, np.ceil(y_max) + 0.5, 5.0)
     plt.yticks(y_ticks)
-    plt.tight_layout(rect=[0.03, 0.05, 0.97, 1]) 
+    plt.xticks(array, x_labels, rotation=0, fontsize=10)
+    plt.tight_layout(rect=[0.03, 0.05, 0.97, 1])
+
+
+def add_russian_labels():
+    """Добавляет русские подписи"""
     plt.legend(fontsize=10)
     plt.xlabel('Недели', fontsize=12)
     plt.ylabel('Заболеваемость гриппом на 10 тыс. населения', fontsize=10)
-    plt.xticks(array, x_labels, rotation=0, fontsize=10)
-    img_path = save_path + f"_{city}_{method}_{type}_{epid_data.begin_year}-{epid_data.end_year}"
-    plt.savefig(img_path + ".pdf", bbox_inches="tight")
-    img_path = img_path + ".png"
-    plt.savefig(img_path, dpi=dpi)
 
-    resize_img(img_path, 
-               future_size=(900, 330), 
-               prefix_name="small",
-               format="png")
-    # plt.savefig(save_path + f"_{city}_{method}_{type}_{epid_data.begin_year}-{epid_data.end_year}.png",
-    #             dpi=600, bbox_inches="tight")
-    # plt.title(title, fontsize=14, fontweight='bold')
+
+def add_english_labels():
+    """Добавляет английские подписи"""
+    plt.xlabel('Weeks', fontsize=12)
+    plt.ylabel('Influenza morbidity per 10000 population', fontsize=10)
+
+
+def translate_legend():
+    """Переводит легенду на английский"""
+    handles, labels = plt.gca().get_legend_handles_labels()
+    label_mapping = {
+        "Лучшая модель": "Best model",
+        "Прогноз": "Forecast",
+        "Данные": "Data"
+    }
     
+    new_labels = []
+    for label in labels:
+        if "Лучшая модель" in label:
+            new_label = label.replace("Лучшая модель", "Best model")
+            new_labels.append(new_label)
+        elif label in label_mapping:
+            new_labels.append(label_mapping[label])
+        else:
+            new_labels.append(label)
+    
+    plt.legend(handles, new_labels, fontsize=10)
+
+
+# ========== ФУНКЦИИ ДЛЯ РАБОТЫ С ИЗОБРАЖЕНИЯМИ ==========
+
+def resize_image_bytes(img_bytes: bytes, future_size: tuple = (900, 330)) -> bytes:
+    """Изменяет размер изображения из байтов и возвращает байты"""
+    img = Image.open(io.BytesIO(img_bytes))
+    img_resized = img.resize(future_size, Image.Resampling.LANCZOS)
+    buf = io.BytesIO()
+    img_resized.save(buf, format="png")
+    return buf.getvalue()
+
+
+def resize_image_file(file_path: str, future_size: tuple = (900, 330), prefix_name: str = "small", format: str = "png") -> str:
+    """Изменяет размер изображения из файла и сохраняет с префиксом"""
+    img = Image.open(file_path)
+    img_resized = img.resize(future_size, Image.Resampling.LANCZOS)
+    new_file_path = file_path.replace(format, "_" + prefix_name + "." + format)
+    img_resized.save(new_file_path)
+    return new_file_path
+
+
+def save_plot_to_bytes(dpi: int) -> Dict[str, bytes]:
+    """Сохраняет текущий график в BytesIO и возвращает словарь с байтами"""
+    # Сохраняем в PNG в память
+    buf_png = io.BytesIO()
+    plt.savefig(buf_png, format='png', dpi=dpi, bbox_inches="tight")
+    buf_png.seek(0)
+    
+    # Сохраняем в PDF в память
+    buf_pdf = io.BytesIO()
+    plt.savefig(buf_pdf, format='pdf', bbox_inches="tight")
+    buf_pdf.seek(0)
+    
+    return {
+        "png": buf_png.getvalue(),
+        "pdf": buf_pdf.getvalue()
+    }
+
+
+def save_plot_to_files(save_path: str, suffix: str, dpi: int) -> Dict[str, str]:
+    """Сохраняет график в файлы и возвращает пути"""
+    img_path = save_path + suffix
+    plt.savefig(img_path + ".pdf", bbox_inches="tight")
+    plt.savefig(img_path + ".png", dpi=dpi, bbox_inches="tight")
+    small_path = resize_image_file(img_path + ".png", prefix_name="small")
+    
+    return {
+        "png": img_path + ".png",
+        "pdf": img_path + ".pdf",
+        "small": small_path
+    }
+
+
+# ========== ОСНОВНАЯ ФУНКЦИЯ ==========
+
+def calibration_forecast_plot(
+    epid_data,
+    city: str,
+    method: str,
+    type: str,
+    forecast_duration: int,
+    title: str,
+    save_path: Optional[str] = None,
+    epsilon: int = 3000,
+    output_mode: Literal["local", "bytes", "both"] = "local",
+    is_prevalence_plot=True,
+    is_recovered_plot=True
+) -> Dict[str, Any]:
+    """
+    Создает калибровочный график прогноза
+    
+    Args:
+        epid_data: данные эпидемии
+        city: название города
+        method: метод калибровки
+        type: тип прогноза ("total" или "age")
+        forecast_duration: длительность прогноза в неделях
+        title: заголовок графика
+        save_path: путь для сохранения (нужен при output_mode="local" или "both")
+        epsilon: параметр epsilon для калибровки
+        output_mode: режим вывода
+            - "local": сохранить локально (требует save_path)
+            - "bytes": вернуть байты (без сохранения на диск)
+            - "both": и сохранить локально, и вернуть байты
+    
+    Returns:
+        Dict с результатами в зависимости от режима:
+            - local: {"ru": {...}, "en": {...}} с путями к файлам
+            - bytes: {"ru": {...}, "en": {...}} с байтами
+            - both: {"ru": {...}, "en": {...}, "local_paths": {...}, "bytes": {...}}
+    """
+    
+    # Проверка save_path для локального сохранения
+    if output_mode in ["local", "both"] and not save_path:
+        raise ValueError(f"save_path is required when output_mode='{output_mode}'")
+    
+    # 1. Подготовка данных
+    data, dur, plot_data = prepare_calibration_data(epid_data, type)
+    model, model_params, func_to_get_newly_data = get_model_and_function(epid_data, type)
+    
+    # 2. Калибровка
+    calibration = run_calibration(model, data, model_params, method, epsilon)
+    
+    # 3. Подготовка к построению
+    dur += forecast_duration * 7
+    array, x_labels = prepare_x_axis(epid_data, dur)
+    ci_params = list(model.get_ci_params())
+    coef_array_data, coef_array_forecast, coef_array_all = calculate_coefficients(epid_data, forecast_duration)
+    dpi = setup_figure()
+    
+    # 4. Построение графика
+    plot_confidence_intervals(model, func_to_get_newly_data, array, coef_array_all, ci_params, dur)
+    plot_best_model_and_data(model, func_to_get_newly_data, array, plot_data, 
+                              coef_array_data, coef_array_forecast, dur)
+    configure_plot_style(array, x_labels)
+    
+    # Базовое имя файла
+    base_filename = f"{save_path}_{city}_{method}_{type}_{epid_data.begin_year}-{epid_data.end_year}" if save_path else ""
+    
+    results = {}
+    
+    # 5. Обработка русской версии
+    add_russian_labels()
+    
+    if output_mode in ["local", "both"]:
+        ru_paths = save_plot_to_files(base_filename, "", dpi)
+        results["ru"] = ru_paths
+    
+    if output_mode in ["bytes", "both"]:
+        ru_bytes = save_plot_to_bytes(dpi)
+        # Создаем маленькую версию
+        ru_bytes["small"] = resize_image_bytes(ru_bytes["png"])
+        results["ru_bytes"] = ru_bytes
+    
+    # 6. Обработка английской версии
+    # Очищаем текущую фигуру для английской версии
     plt.clf()
+    setup_figure()
+    plot_confidence_intervals(model, func_to_get_newly_data, array, coef_array_all, ci_params, dur)
+    plot_best_model_and_data(model, func_to_get_newly_data, array, plot_data, 
+                              coef_array_data, coef_array_forecast, dur)
+    configure_plot_style(array, x_labels)
+    
+    add_english_labels()
+    translate_legend()
+    
+    if output_mode in ["local", "both"]:
+        en_paths = save_plot_to_files(base_filename, "_en", dpi)
+        results["en"] = en_paths
+    
+    if output_mode in ["bytes", "both"]:
+        en_bytes = save_plot_to_bytes(dpi)
+        en_bytes["small"] = resize_image_bytes(en_bytes["png"])
+        results["en_bytes"] = en_bytes
+    
+    # 7. Очистка
+    plt.clf()
+    
+    # 8. Возврат результата
+    if output_mode == "local":
+        return {"ru": results["ru"], "en": results["en"]}
+    elif output_mode == "bytes":
+        return {"ru": results["ru_bytes"], "en": results["en_bytes"]}
+    else:  # both
+        return {
+            "local_paths": {"ru": results["ru"], "en": results["en"]},
+            "bytes": {"ru": results["ru_bytes"], "en": results["en_bytes"]}
+        }
