@@ -108,8 +108,12 @@ class InfluenzaData(EpidData):
             )
         ).content.decode("utf-8")
 
+        # print(data)
+
         # преобразуем в датафрэйм
         self.cases_df = pd.read_csv(StringIO(data), sep="|")
+
+        # print(self.cases_df)
 
         # преобразуем в даты
         self.cases_df["YEAR"] = self.cases_df.apply(date_creation, axis=1)
